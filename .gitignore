@@ -56,3 +56,5 @@ target/
 *.pyc
 
 cache*
+workspace.xml
+.name

@@ -23,9 +23,10 @@ class _DHT_FriendFull(_DHT_Friend, _DHT_FriendDynamic):
         _DHT_FriendDynamic.__init__(self, dynamic.lastPingResponse, dynamic.lastExchange)
 
 class _DHT_Friends:
-    def __init__(self, stateFile, time):
+    def __init__(self, stateFile, time, authorizator):
         self.__stateFile = stateFile
         self.__time = time
+        self.__authorizator = authorizator
 
         # friend_id => _DHT_Friend
         self.__friends = {}
@@ -52,7 +53,7 @@ class _DHT_Friends:
     def add(self, friendId, friendAddress):
         if not friendId in self.__friends:
             self.__friends[friendId] = _DHT_Friend(friendId, friendAddress)
-            self.__friendsDynamic[friendId] = _DHT_FriendDynamic(self.__time.getCurrentTimestamp())
+            self.__friendsDynamic[friendId] = _DHT_FriendDynamic(self.__time.getCurrentTimestamp(), self.__time.getCurrentTimestamp() - FRIENDS_EXCHANGE_INTERVAL + 15)
 
     def size(self):
         return len(self.__friends)
@@ -67,10 +68,10 @@ class _DHT_Friends:
     def haveEnough(self):
         return len(self.__friends) >= MAX_FRIENDS
 
-    def findClosest(self, id, count = FRIENDS_PER_REQUEST, reverse = False, onlyOnline = False):
+    def findClosest(self, id, count = FRIENDS_PER_REQUEST, reverse = False, onlyAuthorized = False):
         closestFriends = []
         for frnd in self.__friends.itervalues():
-            if not onlyOnline or self.__friendsDynamic[id].lastExchange != 0:
+            if not onlyAuthorized or self.__authorizator.isAuthorized(frnd.id):
                 closestFriends.append((distance(id, frnd.id), frnd.id, frnd.address))
                 if len(closestFriends) > count:
                     break
@@ -100,6 +101,12 @@ class _DHT_Friends:
             print friend.id
             print ''
 
+    def getAddresses(self):
+        res = []
+        for friend in self.__friends.values():
+            res.append(friend.address)
+        return res
+
 class _AuthStatusTypes:
     UNAUTHORIZED = 0
     WAITING_ID = 1
@@ -117,6 +124,7 @@ class _AuthStatus:
 class _Authorizator():
     def __init__(self, communicator, dht, crypto):
         self.__statuses = {} # address => _AuthStatus
+        self.__idToStatus = {} # id => _AuthStatus
         self.__communicator = communicator
         self.__dht = dht
         self.__crypto = crypto
@@ -168,6 +176,7 @@ class _Authorizator():
             if packet['type'] == 'confirm_confirm':
                 if packet['rand_seq'] == status.randSeq:
                     status.status = _AuthStatusTypes.AUTHORIZED
+                    self.__idToStatus[status.id] = status
                     for cmd in status.commandsQueue:
                         self.__dht._onPacketReceived(status.address, status.id, cmd)
                     status.commandsQueue = []
@@ -180,6 +189,20 @@ class _Authorizator():
         if status.status == _AuthStatusTypes.AUTHORIZED:
             self.__dht._onPacketReceived(status.address, status.id, packet)
 
+    def isAuthorized(self, id):
+        status = self.__idToStatus.get(id, None)
+        if status is None:
+            return False
+        return status.status == _AuthStatusTypes.AUTHORIZED
+
+    def remove(self, addr):
+        status = self.__statuses.get(addr, None)
+        if status is None:
+            return
+        id = status.id
+        if id in self.__idToStatus:
+            del self.__idToStatus[id]
+        del self.__statuses[addr]
 
 class DHT:
     def __init__(self, login, password, stateFile, communicator, selfAddress, initialAddress, time):
@@ -196,17 +219,18 @@ class DHT:
         self.__communicator.subscribe(selfAddress, self.__authorizator.onPacketReceived)
         self.__time = time
 
-        self.__friends = _DHT_Friends(stateFile, time)
+        self.__friends = _DHT_Friends(stateFile, time, self.__authorizator)
         if self.__friends.empty() and initialAddress:
             self.sendSearchRequest(initialAddress)
         self.__time.scheduleFunc(self.__exchangeFriends, FRIENDS_EXCHANGE_INTERVAL / MAX_FRIENDS)
         self.__time.scheduleFunc(self.__pingFriends, PING_INTERVAL)
 
     def __removeFriendsIfRequired(self):
-        if self.__friends.size() > 1.2 * MAX_FRIENDS:
-            requiredToRemove = 0.2 * MAX_FRIENDS
+        if self.__friends.size() > 1.3 * MAX_FRIENDS:
+            requiredToRemove = 0.15 * MAX_FRIENDS
             farthestFriends = self.__friends.findClosest(self.__id, count=requiredToRemove, reverse=True)
             for f in farthestFriends:
+                self.__authorizator.remove(f[2])
                 self.__friends.remove(f[1])
 
     def __exchangeFriends(self):
@@ -231,6 +255,7 @@ class DHT:
             interval = now - friend.lastPingResponse
             if interval > PING_INTERVAL:
                 if interval > FRIENDS_TIMEOUT:
+                    self.__authorizator.remove(friend.address)
                     self.__friends.remove(friend.id)
                 else:
                     self.__communicator.send(self.__address, friend.address, packet)
@@ -247,7 +272,7 @@ class DHT:
 
     def _onPacketReceived(self, requesterAddress, requesterId, packet):
         if packet['type'] == 'search':
-            closestFriends = self.__friends.findClosest(requesterId)
+            closestFriends = self.__friends.findClosest(requesterId, onlyAuthorized=True)
             closestFriends.append((distance(self.__id, requesterId), self.__id, self.__address))
             closestFriends = sorted(closestFriends)[:FRIENDS_PER_REQUEST]
             newClosestFriends = []
@@ -274,7 +299,7 @@ class DHT:
                 self.sendSearchRequest(newClosest[2])
 
         elif packet['type'] == 'exchange':
-            closestFriends = self.__friends.findClosest(requesterId, MAX_FRIENDS)
+            closestFriends = self.__friends.findClosest(requesterId, MAX_FRIENDS, onlyAuthorized=True)
             newClosestFriends = []
             for _, id, address in closestFriends:
                 newClosestFriends.append((id, address))
@@ -325,3 +350,6 @@ class DHT:
 
     def dumpFriends(self):
         self.__friends.dump()
+
+    def getFriendsAddresses(self):
+        return self.__friends.getAddresses()

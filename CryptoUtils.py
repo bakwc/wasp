@@ -35,11 +35,15 @@ class CryptoUtils:
         return (privKey, pubKey)
 
     def encrypt(self, pubKey, message):
+        if _g_fake_crypto:
+            return message
         key = RSA.importKey(pubKey)
         key = PKCS1_OAEP.new(key)
         return key.encrypt(message)
 
     def decrypt(self, privKey, message):
+        if _g_fake_crypto:
+            return message
         key = RSA.importKey(privKey)
         key = PKCS1_OAEP.new(key)
         return key.decrypt(message)
@@ -107,12 +111,17 @@ def _UT():
 _g_distanceCache = {}
 
 _g_cache_enabled = False
+_g_fake_crypto = False
 
 def _enableCache():
     global _g_cache_enabled
     _g_cache_enabled = True
     if not os.path.isdir('cache'):
         os.makedirs('cache')
+
+def _enableFakeCrypto():
+    global _g_fake_crypto
+    _g_fake_crypto = True
 
 if __name__ == '__main__':
     _UT()
